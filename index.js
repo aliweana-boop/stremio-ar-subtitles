@@ -16,14 +16,13 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname || '/';
 
-  // 1. مسار الـ Manifest (يعطي خيار ترجمة واحدة نظيفة لعدم التشتت)
   if (pathname === '/manifest.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       id: 'org.custom.perfectsubtitles',
-      version: '11.0.0',
-      name: '🇸🇦 Perfect Arabic Subtitles',
-      description: 'محرك المزامنة الجوهرية وضبط التوقيت التلقائي للترجمة العربية',
+      version: '6.2.0',
+      name: 'Perfect Arabic Subtitles',
+      description: 'محرك المزامنة الإحصائية الجوهرية للترجمة العربية',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -32,10 +31,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. مسار معالجة ومزامنة الترجمة
   if (pathname === '/proxy-sub') {
     const arUrl = parsedUrl.query.arUrl;
     const refUrl = parsedUrl.query.refUrl;
+    const offset = parseInt(parsedUrl.query.offset || '0', 10);
 
     if (!arUrl) {
       res.writeHead(400);
@@ -54,7 +53,7 @@ const server = http.createServer(async (req, res) => {
       const arText = await arRes.text();
       const refText = (refRes && refRes.ok) ? await refRes.text() : null;
 
-      const syncedSrt = processSubtitles(arText, refText);
+      const syncedSrt = processSubtitles(arText, refText, offset);
 
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
@@ -68,12 +67,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. مسار الترجمات لـ Stremio (إرجاع ترجمة واحدة ممتازة فقط لتجنب الحوسة)
   if (pathname.startsWith('/subtitles/')) {
     const cleanPath = pathname.replace('.json', '');
     const parts = cleanPath.split('/');
     const type = parts[2];
     const id = parts[3] ? decodeURIComponent(parts[3]) : '';
+    const extra = parts[4] ? `/${decodeURIComponent(parts[4])}` : '';
 
     if (!type || !id) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -81,7 +80,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const targetUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${encodeURIComponent(id)}.json`;
+    // تصحيح رابط المصدر الرسمي لـ OpenSubtitles Stremio
+    const targetUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${encodeURIComponent(id)}${extra ? encodeURI(extra) : ''}.json`;
     const host = req.headers.host;
     const protocol = req.headers['x-forwarded-proto'] || 'https';
 
@@ -94,17 +94,34 @@ const server = http.createServer(async (req, res) => {
       const refSub = subs.find(s => s.lang === 'eng' || s.lang === 'en');
       const refParam = refSub ? `&refUrl=${encodeURIComponent(refSub.url)}` : '';
 
-      let formatted = [];
-      if (arabicSubs.length > 0) {
-        // نأخذ الترجمة الأولى فقط ونعالجها لتقديم خيار واحد نظيف تماماً
-        const bestSub = arabicSubs[0];
+      const formatted = [];
+
+      arabicSubs.slice(0, 3).forEach((s, idx) => {
+        const baseProxy = `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}${refParam}`;
+        
+        // الخيار الأول: مزامنة تلقائية ذكية
         formatted.push({
-          id: `sync-pure-${id}`,
-          url: `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(bestSub.url)}${refParam}`,
+          id: `auto-${idx}-${id}`,
+          url: `${baseProxy}&offset=0`,
           lang: 'ara',
-          label: '🇸🇦 الترجمة العربية الذكية (مضبوطة ومزمنة تلقائياً)'
+          label: `🇸🇦 العربية ${idx + 1} (مزامنة تلقائية ذكية)`
         });
-      }
+
+        // خيارات إضافية للتقديم الفوري إذا كانت الترجمة متأخرة
+        formatted.push({
+          id: `fast1-${idx}-${id}`,
+          url: `${baseProxy}&offset=-1000`,
+          lang: 'ara',
+          label: `🇸🇦 العربية ${idx + 1} (مزامنة + تقديم 1 ثانية)`
+        });
+
+        formatted.push({
+          id: `fast2-${idx}-${id}`,
+          url: `${baseProxy}&offset=-2500`,
+          lang: 'ara',
+          label: `🇸🇦 العربية ${idx + 1} (مزامنة + تقديم 2.5 ثانية)`
+        });
+      });
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ subtitles: formatted }));
@@ -116,7 +133,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Perfect Subtitles Addon is Running on Render!');
+  res.end('Stremio Perfect Subtitles Addon v6.2.0 is Running!');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
