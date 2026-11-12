@@ -16,10 +16,10 @@ const server = http.createServer(async (req, res) => {
   if (reqUrl === '/manifest.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
-      id: 'org.custom.hashmatch',
-      version: '8.0.0',
-      name: '🇸🇦 Hash-Matched Arabic Subtitles',
-      description: 'مطابقة فعلية للترجمة بناءً على بصمة واسم الملف (بدون تخمين زمني)',
+      id: 'org.custom.clonesync',
+      version: '9.0.0',
+      name: '🇸🇦 Direct Clone Subtitles',
+      description: 'نظام الاستنساخ: نص عربي على توقيت إنجليزي دقيق 100%',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -28,10 +28,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // مسار جلب وتنظيف الترجمة
+  // مسار جلب الترجمتين ودمجهم
   if (reqUrl.startsWith('/proxy-sub')) {
     const urlParams = new URLSearchParams(reqUrl.split('?')[1]);
     const arUrl = urlParams.get('arUrl');
+    const refUrl = urlParams.get('refUrl');
+    const offset = parseInt(urlParams.get('offset') || '0', 10);
 
     if (!arUrl) {
       res.writeHead(400);
@@ -40,17 +42,24 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const response = await fetch(arUrl, { headers: HEADERS });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const [arRes, refRes] = await Promise.all([
+        fetch(arUrl, { headers: HEADERS }),
+        refUrl ? fetch(refUrl, { headers: HEADERS }).catch(() => null) : Promise.resolve(null)
+      ]);
+
+      if (!arRes.ok) throw new Error(`HTTP ${arRes.status}`);
       
-      const arText = await response.text();
-      const cleanSrt = processSubtitles(arText);
+      const arText = await arRes.text();
+      const refText = (refRes && refRes.ok) ? await refRes.text() : null;
+
+      // تطبيق فكرتك: النص العربي في التوقيت الإنجليزي
+      const syncedSrt = processSubtitles(arText, refText, offset);
 
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
         'Content-Disposition': 'inline; filename="subtitle.srt"'
       });
-      res.end(cleanSrt);
+      res.end(syncedSrt);
     } catch (error) {
       res.writeHead(500);
       res.end('Error processing subtitle');
@@ -58,7 +67,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // قلب النظام: تمرير المسار بالكامل (بما فيه بصمة الملف) للمصدر الرسمي
   if (reqUrl.startsWith('/subtitles/')) {
     const targetUrl = `https://opensubtitles-v3.strem.io${reqUrl}`;
     const host = req.headers.host;
@@ -70,18 +78,29 @@ const server = http.createServer(async (req, res) => {
       const subs = parsed.subtitles || [];
 
       const arabicSubs = subs.filter(s => s.lang === 'ara' || s.lang === 'ar');
+      const englishSub = subs.find(s => s.lang === 'eng' || s.lang === 'en'); // جلب المرجع الإنجليزي المضبوط
+      const refParam = englishSub ? `&refUrl=${encodeURIComponent(englishSub.url)}` : '';
+
       const formatted = [];
 
-      if (arabicSubs.length > 0) {
-        // نأخذ أول خيار لأنه المطابق رسمياً لبصمة الملف
-        const bestSub = arabicSubs[0];
+      arabicSubs.slice(0, 3).forEach((s, idx) => {
+        const baseProxy = `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}${refParam}`;
+        
         formatted.push({
-          id: 'sub-hash-match',
-          url: `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(bestSub.url)}`,
+          id: `clone-auto-${idx}`,
+          url: `${baseProxy}&offset=0`,
           lang: 'ara',
-          label: '🇸🇦 العربية (مطابقة بالبصمة - Hash Match)'
+          label: `🇸🇦 العربية ${idx + 1} (استنساخ التوقيت الإنجليزي)`
         });
-      }
+        
+        // خيارات تقديم وتأخير سريع احتياطية
+        formatted.push({
+          id: `clone-fast1-${idx}`,
+          url: `${baseProxy}&offset=-1000`,
+          lang: 'ara',
+          label: `🇸🇦 العربية ${idx + 1} (استنساخ + تقديم 1ث)`
+        });
+      });
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ subtitles: formatted }));
@@ -93,7 +112,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Hash Match Addon is Running!');
+  res.end('Stremio Clone Sync Addon is Running!');
 });
 
 server.listen(PORT, '0.0.0.0', () => {

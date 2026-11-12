@@ -12,7 +12,7 @@ function parseSRT(srtText) {
         const end = timeToMs(timeMatch[2]);
         const text = lines.slice(2).join('\n').trim();
         
-        // استبعاد إعلانات المترجمين والمواقع
+        // استبعاد صارم للإعلانات عشان ما يخترب ترتيب السطور
         if (!isAdLine(text) && text.length > 0) {
           items.push({ start, end, text });
         }
@@ -51,9 +51,42 @@ function buildSRT(items) {
   }).join('\n\n');
 }
 
-function processSubtitles(arabicSrtRaw) {
-  const items = parseSRT(arabicSrtRaw);
-  return buildSRT(items);
+// قلب الفكرة حقك: حقن النص العربي في التوقيت الإنجليزي
+function processSubtitles(arabicSrtRaw, referenceSrtRaw = null, manualOffsetMs = 0) {
+  const arItems = parseSRT(arabicSrtRaw);
+  
+  if (!referenceSrtRaw) {
+    // لو مافيه إنجليزي، نرجع العربي زي ماهو
+    return buildSRT(arItems); 
+  }
+
+  const enItems = parseSRT(referenceSrtRaw);
+  const finalItems = [];
+  
+  // مطابقة سطر بسطر (النص من العربي، والوقت من الإنجليزي)
+  const minLength = Math.min(arItems.length, enItems.length);
+
+  for (let i = 0; i < minLength; i++) {
+    finalItems.push({
+      start: enItems[i].start + manualOffsetMs,
+      end: enItems[i].end + manualOffsetMs,
+      text: arItems[i].text // هنا نأخذ النص العربي ونحطه في القالب الإنجليزي
+    });
+  }
+
+  // لو الترجمة العربية فيها سطور إضافية في النهاية، نكملها
+  if (arItems.length > enItems.length) {
+    const timeShift = enItems[minLength - 1].start - arItems[minLength - 1].start;
+    for (let i = minLength; i < arItems.length; i++) {
+      finalItems.push({
+        start: arItems[i].start + timeShift + manualOffsetMs,
+        end: arItems[i].end + timeShift + manualOffsetMs,
+        text: arItems[i].text
+      });
+    }
+  }
+
+  return buildSRT(finalItems);
 }
 
 module.exports = { processSubtitles };
