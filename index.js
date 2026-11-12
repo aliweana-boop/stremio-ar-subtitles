@@ -1,9 +1,7 @@
 const http = require('http');
-const url = require('url');
 const { processSubtitles } = require('./syncEngine');
 
 const PORT = process.env.PORT || 3000;
-
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*'
@@ -13,16 +11,15 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
 
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname || '/';
+  const reqUrl = req.url;
 
-  if (pathname === '/manifest.json') {
+  if (reqUrl === '/manifest.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
-      id: 'org.custom.purearabic',
-      version: '7.0.0',
-      name: '🇸🇦 Pure Arabic Subtitles',
-      description: 'إضافة الترجمات العربية النقية (مصححة ومنظفة بدون تدخلات خارجية)',
+      id: 'org.custom.hashmatch',
+      version: '8.0.0',
+      name: '🇸🇦 Hash-Matched Arabic Subtitles',
+      description: 'مطابقة فعلية للترجمة بناءً على بصمة واسم الملف (بدون تخمين زمني)',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -31,9 +28,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // مسار جلب وتنظيف الترجمة العربية
-  if (pathname === '/proxy-sub') {
-    const arUrl = parsedUrl.query.arUrl;
+  // مسار جلب وتنظيف الترجمة
+  if (reqUrl.startsWith('/proxy-sub')) {
+    const urlParams = new URLSearchParams(reqUrl.split('?')[1]);
+    const arUrl = urlParams.get('arUrl');
 
     if (!arUrl) {
       res.writeHead(400);
@@ -55,25 +53,14 @@ const server = http.createServer(async (req, res) => {
       res.end(cleanSrt);
     } catch (error) {
       res.writeHead(500);
-      res.end(`Error processing subtitle: ${error.message}`);
+      res.end('Error processing subtitle');
     }
     return;
   }
 
-  if (pathname.startsWith('/subtitles/')) {
-    const cleanPath = pathname.replace('.json', '');
-    const parts = cleanPath.split('/');
-    const type = parts[2];
-    const id = parts[3] ? decodeURIComponent(parts[3]) : '';
-    const extra = parts[4] ? `/${decodeURIComponent(parts[4])}` : '';
-
-    if (!type || !id) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ subtitles: [] }));
-      return;
-    }
-
-    const targetUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${encodeURIComponent(id)}${extra ? encodeURI(extra) : ''}.json`;
+  // قلب النظام: تمرير المسار بالكامل (بما فيه بصمة الملف) للمصدر الرسمي
+  if (reqUrl.startsWith('/subtitles/')) {
+    const targetUrl = `https://opensubtitles-v3.strem.io${reqUrl}`;
     const host = req.headers.host;
     const protocol = req.headers['x-forwarded-proto'] || 'https';
 
@@ -85,15 +72,16 @@ const server = http.createServer(async (req, res) => {
       const arabicSubs = subs.filter(s => s.lang === 'ara' || s.lang === 'ar');
       const formatted = [];
 
-      // نعرض أفضل 3 ترجمات، لأن نسخة الفيلم قد تختلف من ملف لملف
-      arabicSubs.slice(0, 3).forEach((s, idx) => {
+      if (arabicSubs.length > 0) {
+        // نأخذ أول خيار لأنه المطابق رسمياً لبصمة الملف
+        const bestSub = arabicSubs[0];
         formatted.push({
-          id: `pure-ar-${idx}-${id}`,
-          url: `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}`,
+          id: 'sub-hash-match',
+          url: `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(bestSub.url)}`,
           lang: 'ara',
-          label: `🇸🇦 العربية (خيار ${idx + 1}) - خالية من الإعلانات`
+          label: '🇸🇦 العربية (مطابقة بالبصمة - Hash Match)'
         });
-      });
+      }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ subtitles: formatted }));
@@ -105,7 +93,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Pure Arabic Subtitles is Running!');
+  res.end('Stremio Hash Match Addon is Running!');
 });
 
 server.listen(PORT, '0.0.0.0', () => {

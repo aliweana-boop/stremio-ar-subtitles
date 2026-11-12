@@ -12,7 +12,7 @@ function parseSRT(srtText) {
         const end = timeToMs(timeMatch[2]);
         const text = lines.slice(2).join('\n').trim();
         
-        // استبعاد الإعلانات
+        // استبعاد إعلانات المترجمين والمواقع
         if (!isAdLine(text) && text.length > 0) {
           items.push({ start, end, text });
         }
@@ -25,7 +25,7 @@ function parseSRT(srtText) {
 function isAdLine(text) {
   const adPatterns = [
     /opensubtitles/i, /subscene/i, /yify/i, /http/i, /www\./i,
-    /ترجمة/i, /تعديل/i, /الحقوق/i, /مشاهدة ممتعة/i
+    /ترجمة/i, /تعديل/i, /الحقوق/i, /مشاهدة ممتعة/i, /synced/i, /subby/i
   ];
   return adPatterns.some(pattern => pattern.test(text));
 }
@@ -45,26 +45,6 @@ function msToTime(ms) {
   return `${h}:${m}:${s},${remMs}`;
 }
 
-// تنظيف البنية وإصلاح التداخل بدون العبث بالتوقيت الأصلي
-function cleanAndHeal(items) {
-  const healed = [];
-  for (let i = 0; i < items.length; i++) {
-    let { start, end, text } = items[i];
-    if (end <= start) continue;
-    
-    // الحد الأدنى لمدة الظهور
-    if (end - start < 1000) end = start + 1000;
-    
-    // منع التداخل بين الجمل
-    if (i < items.length - 1 && end >= items[i + 1].start) {
-      end = Math.max(start + 500, items[i + 1].start - 40);
-    }
-    
-    healed.push({ start, end, text });
-  }
-  return healed;
-}
-
 function buildSRT(items) {
   return items.map((item, idx) => {
     return `${idx + 1}\n${msToTime(item.start)} --> ${msToTime(item.end)}\n${item.text}`;
@@ -72,9 +52,8 @@ function buildSRT(items) {
 }
 
 function processSubtitles(arabicSrtRaw) {
-  const arabicItems = parseSRT(arabicSrtRaw);
-  const finalItems = cleanAndHeal(arabicItems);
-  return buildSRT(finalItems);
+  const items = parseSRT(arabicSrtRaw);
+  return buildSRT(items);
 }
 
 module.exports = { processSubtitles };
