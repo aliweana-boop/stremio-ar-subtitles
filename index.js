@@ -6,17 +6,43 @@ const HEADERS = {
   'Accept': 'application/json, text/plain, */*'
 };
 
-// دالة ذكية لمواءمة وتثبيت التوقيت الزمني من الإنجليزي إلى العربي
-function syncSubtitleTiming(enSrt, arSrt) {
+// تحويل توقيت SRT (مثل 00:01:20,123) إلى ميللي ثانية
+function timeToMs(timeStr) {
+  const match = timeStr.match(/(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})/);
+  if (!match) return 0;
+  return (
+    parseInt(match[1], 10) * 3600000 +
+    parseInt(match[2], 10) * 60000 +
+    parseInt(match[3], 10) * 1000 +
+    parseInt(match[4], 10)
+  );
+}
+
+// تحويل الميللي ثانية إلى تنسيق SRT من جديد
+function msToTime(ms) {
+  if (ms < 0) ms = 0;
+  const hours = String(Math.floor(ms / 3600000)).padStart(2, '0');
+  const minutes = String(Math.floor((ms % 3600000) / 60000)).padStart(2, '0');
+  const seconds = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+  const milliseconds = String(ms % 1000).padStart(3, '0');
+  return `${hours}:${minutes}:${seconds},${milliseconds}`;
+}
+
+// دالة تحليل ومزامنة التوقيت مع تصحيح معدل الإطارات (FPS Drift & Time Stretch)
+function advancedSyncSubtitle(enSrt, arSrt) {
   try {
     const parseSrt = (srtText) => {
       return srtText.trim().split(/\r?\n\r?\n/).map(block => {
         const lines = block.split(/\r?\n/);
         if (lines.length >= 3) {
-          return {
-            time: lines[1], // التوقيت (مثال: 00:01:20,123 --> 00:01:25,456)
-            text: lines.slice(2).join('\n') // النص
-          };
+          const parts = lines[1].split(' --> ');
+          if (parts.length === 2) {
+            return {
+              startMs: timeToMs(parts[0]),
+              endMs: timeToMs(parts[1]),
+              text: lines.slice(2).join('\n')
+            };
+          }
         }
         return null;
       }).filter(Boolean);
@@ -27,18 +53,32 @@ function syncSubtitleTiming(enSrt, arSrt) {
 
     if (enBlocks.length === 0 || arBlocks.length === 0) return arSrt;
 
-    // دمج التوقيت الإنجليزي مع النص العربي حسب تسلسل الأسطر
+    // حساب معامل تمدد السرعة (Time Stretch Factor) لمطابقة الفترات الزمنية بدقة
+    const firstEn = enBlocks[0].startMs;
+    const lastEn = enBlocks[enBlocks.length - 1].startMs;
+    const firstAr = arBlocks[0].startMs;
+    const lastAr = arBlocks[lastAr = arBlocks.length - 1].startMs;
+
+    let stretchFactor = 1.0;
+    if (lastAr > firstAr && lastEn > firstEn) {
+      stretchFactor = (lastEn - firstEn) / (lastAr - firstAr);
+    }
+
     let syncedSrt = '';
     for (let i = 0; i < arBlocks.length; i++) {
-      const timing = enBlocks[i] ? enBlocks[i].time : arBlocks[i].time;
-      const text = arBlocks[i].text;
+      const arBlock = arBlocks[i];
       
-      syncedSrt += `${i + 1}\n${timing}\n${text}\n\n`;
+      // تطبيق عامل التمدد وتصحيح البداية والنهاية بناءً على الترجمة الإنجليزية المرجعية
+      const adjustedStart = Math.round(firstEn + (arBlock.startMs - firstAr) * stretchFactor);
+      const adjustedEnd = Math.round(firstEn + (arBlock.endMs - firstAr) * stretchFactor);
+
+      const timeLine = `${msToTime(adjustedStart)} --> ${msToTime(adjustedEnd)}`;
+      syncedSrt += `${i + 1}\n${timeLine}\n${arBlock.text}\n\n`;
     }
 
     return syncedSrt;
   } catch (e) {
-    return arSrt; // في حال حدث أي خطأ، يعود للترجمة الأصلية
+    return arSrt; // الرجوع للنص الأصلي في حال وجود أي استثناء
   }
 }
 
@@ -53,9 +93,9 @@ const server = async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       id: 'org.custom.perfectsubtitles',
-      version: '6.1.0',
-      name: 'Perfect Synced Arabic Subtitles',
-      description: 'المحرك الهندسي الموازن للتوقت والزمن بدقة متناهية',
+      version: '6.2.0',
+      name: 'Perfect Auto-Synced Arabic Subtitles',
+      description: 'المحرك الهندسي المتقدم لمزامنة التوقيت ومعالجة معدل الإطارات (FPS Stretch)',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -64,10 +104,10 @@ const server = async (req, res) => {
     return;
   }
 
-  // مسار جلب ومواءمة الترجمة (Proxy & Sync)
+  // مسار جلب الترجمة وتطبيق الخوارزمية المتقدمة
   if (pathname === '/proxy-sub') {
     const targetUrl = parsedUrl.query.url;
-    const refUrl = parsedUrl.query.ref; // رابط الترجمة الإنجليزية المرجعية
+    const refUrl = parsedUrl.query.ref;
     
     if (!targetUrl) {
       res.writeHead(400);
@@ -80,16 +120,15 @@ const server = async (req, res) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       let subText = await response.text();
 
-      // إذا وُجدت ترجمة إنجليزية مرجعية، نقوم بمواءمة التوقيت عليها
       if (refUrl) {
         try {
           const refResponse = await fetch(refUrl, { headers: HEADERS });
           if (refResponse.ok) {
             const refText = await refResponse.text();
-            subText = syncSubtitleTiming(refText, subText);
+            subText = advancedSyncSubtitle(refText, subText);
           }
         } catch (err) {
-          console.log('Sync warning:', err.message);
+          console.log('Advanced Sync warning:', err.message);
         }
       }
 
@@ -131,10 +170,10 @@ const server = async (req, res) => {
       const refUrlParam = englishSub ? `&ref=${encodeURIComponent(englishSub.url)}` : '';
 
       const formatted = arabicSubs.map((s, idx) => ({
-        id: `sub-synced-${idx}-${id}`,
+        id: `sub-adv-sync-${idx}-${id}`,
         url: `${protocol}://${host}/proxy-sub?url=${encodeURIComponent(s.url)}${refUrlParam}`,
         lang: 'ara',
-        label: `🇸🇦 [معايرة زمنية دقيقة] ترجمة عربية (${idx + 1})`
+        label: `🇸🇦 [مزامنة متقدمة + تصحيح الفريمات] ترجمة (${idx + 1})`
       }));
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
