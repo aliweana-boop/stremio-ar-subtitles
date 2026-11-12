@@ -1,4 +1,5 @@
 const http = require('http');
+const url = require('url');
 const { processSubtitles } = require('./syncEngine');
 
 const PORT = process.env.PORT || 3000;
@@ -17,9 +18,9 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       id: 'org.custom.clonesync',
-      version: '9.0.0',
-      name: '🇸🇦 Direct Clone Subtitles',
-      description: 'نظام الاستنساخ: نص عربي على توقيت إنجليزي دقيق 100%',
+      version: '10.0.0',
+      name: '🇸🇦 Arabic Subs (Auto + Manual Sync)',
+      description: 'ترجمات عربية مع خيارات التأخير والتقديم المباشرة من القائمة',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -28,7 +29,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // مسار جلب الترجمتين ودمجهم
   if (reqUrl.startsWith('/proxy-sub')) {
     const urlParams = new URLSearchParams(reqUrl.split('?')[1]);
     const arUrl = urlParams.get('arUrl');
@@ -52,7 +52,7 @@ const server = http.createServer(async (req, res) => {
       const arText = await arRes.text();
       const refText = (refRes && refRes.ok) ? await refRes.text() : null;
 
-      // تطبيق فكرتك: النص العربي في التوقيت الإنجليزي
+      // تطبيق محرك المزامنة مع الإزاحة المطلوبة
       const syncedSrt = processSubtitles(arText, refText, offset);
 
       res.writeHead(200, {
@@ -78,29 +78,46 @@ const server = http.createServer(async (req, res) => {
       const subs = parsed.subtitles || [];
 
       const arabicSubs = subs.filter(s => s.lang === 'ara' || s.lang === 'ar');
-      const englishSub = subs.find(s => s.lang === 'eng' || s.lang === 'en'); // جلب المرجع الإنجليزي المضبوط
+      const englishSub = subs.find(s => s.lang === 'eng' || s.lang === 'en');
       const refParam = englishSub ? `&refUrl=${encodeURIComponent(englishSub.url)}` : '';
 
       const formatted = [];
 
-      arabicSubs.slice(0, 3).forEach((s, idx) => {
-        const baseProxy = `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}${refParam}`;
+      // نأخذ أفضل ترجمة عربية واحدة، ونعطي عليها خيارات التوقيت عشان ما تصير القائمة زحمة
+      if (arabicSubs.length > 0) {
+        const bestSub = arabicSubs[0];
+        const baseProxy = `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(bestSub.url)}${refParam}`;
         
         formatted.push({
-          id: `clone-auto-${idx}`,
+          id: `sub-auto`,
           url: `${baseProxy}&offset=0`,
           lang: 'ara',
-          label: `🇸🇦 العربية ${idx + 1} (استنساخ التوقيت الإنجليزي)`
+          label: `🇸🇦 [تلقائي] المزامنة الذكية`
         });
         
-        // خيارات تقديم وتأخير سريع احتياطية
+        // خيارات التأخير (إذا كانت الترجمة تسبق الصوت)
         formatted.push({
-          id: `clone-fast1-${idx}`,
-          url: `${baseProxy}&offset=-1000`,
+          id: `sub-delay1`,
+          url: `${baseProxy}&offset=1000`, // تأخير 1 ثانية
           lang: 'ara',
-          label: `🇸🇦 العربية ${idx + 1} (استنساخ + تقديم 1ث)`
+          label: `🇸🇦 [تأخير 1 ثانية] (الترجمة متقدمة)`
         });
-      });
+
+        formatted.push({
+          id: `sub-delay2`,
+          url: `${baseProxy}&offset=2000`, // تأخير 2 ثانية
+          lang: 'ara',
+          label: `🇸🇦 [تأخير 2 ثانية] (الترجمة متقدمة جداً)`
+        });
+
+        // خيارات التقديم (إذا كانت الترجمة متأخرة عن الصوت)
+        formatted.push({
+          id: `sub-fast1`,
+          url: `${baseProxy}&offset=-1000`, // تقديم 1 ثانية
+          lang: 'ara',
+          label: `🇸🇦 [تقديم 1 ثانية] (الترجمة متأخرة)`
+        });
+      }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ subtitles: formatted }));
@@ -112,7 +129,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Clone Sync Addon is Running!');
+  res.end('Stremio Custom Offset Addon is Running!');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
