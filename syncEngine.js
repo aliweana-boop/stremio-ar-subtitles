@@ -50,37 +50,91 @@ function buildSRT(items) {
   }).join('\n\n');
 }
 
-// محرك الحقن المباشر: أخذ الوقت من ملف (المرجع الإنجليزي) والنص من ملف آخر (العربي) حبة بحبة
+// محرك الاستنساخ الذكي: البحث عن أقرب وقت إنجليزي متطابق مكانياً وليس رقمياً
 function processSubtitles(arabicSrtRaw, referenceSrtRaw = null, manualOffsetMs = 0) {
   const arItems = parseSRT(arabicSrtRaw);
   
-  if (!referenceSrtRaw) {
+  if (!referenceSrtRaw || arItems.length < 5) {
     return buildSRT(arItems.map(i => ({ ...i, start: i.start + manualOffsetMs, end: i.end + manualOffsetMs })));
   }
 
   const enItems = parseSRT(referenceSrtRaw);
-  const finalItems = [];
-  
-  // دمج النص العربي مع الوقت الإنجليزي سطر بسطر (حبة بحبة)
-  const minLength = Math.min(arItems.length, enItems.length);
+  if (enItems.length < 5) return buildSRT(arItems);
 
-  for (let i = 0; i < minLength; i++) {
-    finalItems.push({
-      start: enItems[i].start + manualOffsetMs,
-      end: enItems[i].end + manualOffsetMs,
-      text: arItems[i].text // النص من العربي، والوقت من الإنجليزي
-    });
+  const arFirst = arItems[0].start;
+  const enFirst = enItems[0].start;
+  const initialOffset = enFirst - arFirst;
+
+  const arSpan = arItems[arItems.length - 1].start - arFirst;
+  const enSpan = enItems[enItems.length - 1].start - enFirst;
+  
+  let stretchFactor = 1.0;
+  if (arSpan > 0 && enSpan > 0) {
+    const rawStretch = enSpan / arSpan;
+    if (rawStretch > 0.8 && rawStretch < 1.2) stretchFactor = rawStretch;
   }
 
-  // إذا كانت الترجمة العربية أطول، نكمل الباقي مع ضبط الوقت بناءً على الفارق الأخير
-  if (arItems.length > enItems.length) {
-    const lastSyncOffset = enItems[minLength - 1].start - arItems[minLength - 1].start;
-    for (let i = minLength; i < arItems.length; i++) {
+  const finalItems = [];
+  let j = 0; // مؤشر الإنجليزي
+
+  // مطابقة كل سطر عربي مع السطر الإنجليزي الأقرب له في الزمن
+  for (let i = 0; i < arItems.length; i++) {
+    const ar = arItems[i];
+    // حساب التوقيت المفترض للسطر العربي
+    const idealStart = arFirst + ((ar.start - arFirst) * stretchFactor) + initialOffset;
+
+    let bestJ = j;
+    let minDiff = Infinity;
+
+    // نبحث في السطور الإنجليزية الجاية (نطاق 25 سطر) عن أقرب وقت
+    const searchLimit = Math.min(enItems.length, j + 25);
+    for (let k = j; k < searchLimit; k++) {
+      const diff = Math.abs(enItems[k].start - idealStart);
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestJ = k;
+      }
+    }
+
+    j = bestJ; // تحديث المؤشر عشان ما نرجع للأسطر السابقة
+
+    // إذا لقينا وقت إنجليزي مقارب جداً، "نسرق" توقيته بالضبط!
+    if (minDiff < 3000) {
       finalItems.push({
-        start: arItems[i].start + lastSyncOffset + manualOffsetMs,
-        end: arItems[i].end + lastSyncOffset + manualOffsetMs,
-        text: arItems[i].text
+        start: enItems[bestJ].start + manualOffsetMs,
+        end: enItems[bestJ].end + manualOffsetMs,
+        text: ar.text
       });
+    } else {
+      // لو مافي سطر إنجليزي قريب، نعتمد الوقت المحسوب رياضياً
+      finalItems.push({
+        start: idealStart + manualOffsetMs,
+        end: idealStart + ((ar.end - ar.start) * stretchFactor) + manualOffsetMs,
+        text: ar.text
+      });
+    }
+  }
+
+  // معالجة ذكية: لو المترجم العربي قسم جملة إنجليزية لسطرين، راح ياخذون نفس الوقت ويدخلون ببعض
+  // هنا نقسم الوقت بالنص بينهم عشان يظهرون بالترتيب ورا بعض
+  for (let i = 1; i < finalItems.length; i++) {
+    if (finalItems[i].start <= finalItems[i - 1].start) {
+      const sharedEnd = finalItems[i - 1].end;
+      const midPoint = Math.floor((finalItems[i - 1].start + sharedEnd) / 2);
+      
+      finalItems[i - 1].end = midPoint - 20;
+      finalItems[i].start = midPoint + 20;
+      
+      if (finalItems[i].end <= finalItems[i].start) {
+        finalItems[i].end = finalItems[i].start + 1000;
+      }
+    }
+  }
+
+  // منع التداخل النهائي لأي جمل متقاربة
+  for (let i = 0; i < finalItems.length - 1; i++) {
+    if (finalItems[i].end >= finalItems[i + 1].start) {
+      finalItems[i].end = Math.max(finalItems[i].start + 500, finalItems[i + 1].start - 40);
     }
   }
 
