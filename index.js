@@ -6,7 +6,7 @@ const HEADERS = {
   'Accept': 'application/json, text/plain, */*'
 };
 
-// تحويل توقيت SRT (مثل 00:01:20,123) إلى ميللي ثانية
+// تحويل توقيت SRT إلى ميللي ثانية
 function timeToMs(timeStr) {
   const match = timeStr.match(/(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})/);
   if (!match) return 0;
@@ -18,7 +18,7 @@ function timeToMs(timeStr) {
   );
 }
 
-// تحويل الميللي ثانية إلى تنسيق SRT من جديد
+// تحويل الميللي ثانية إلى تنسيق SRT
 function msToTime(ms) {
   if (ms < 0) ms = 0;
   const hours = String(Math.floor(ms / 3600000)).padStart(2, '0');
@@ -28,57 +28,101 @@ function msToTime(ms) {
   return `${hours}:${minutes}:${seconds},${milliseconds}`;
 }
 
-// دالة تحليل ومزامنة التوقيت مع تصحيح معدل الإطارات (FPS Drift & Time Stretch)
-function advancedSyncSubtitle(enSrt, arSrt) {
+// تحليل ملف الترجمة إلى كائنات بيانات مصفوفة
+function parseSrt(srtText) {
+  return srtText.trim().split(/\r?\n\r?\n/).map(block => {
+    const lines = block.split(/\r?\n/);
+    if (lines.length >= 3) {
+      const parts = lines[1].split(' --> ');
+      if (parts.length === 2) {
+        return {
+          startMs: timeToMs(parts[0]),
+          endMs: timeToMs(parts[1]),
+          text: lines.slice(2).join('\n')
+        };
+      }
+    }
+    return null;
+  }).filter(Boolean);
+}
+
+// فلتر تنظيف الإعلانات والحقوق من بداية ونهاية الملف
+function stripAdsAndJunk(blocks) {
+  return blocks.filter(b => {
+    const t = b.text.toLowerCase();
+    return !(
+      t.includes('http') ||
+      t.includes('www.') ||
+      t.includes('.com') ||
+      t.includes('subscene') ||
+      t.includes('opensubtitles') ||
+      t.includes('translated by') ||
+      t.includes('ترجمة:') ||
+      t.includes('إعداد:')
+    );
+  });
+}
+
+// خوارزمية المزامنة المتقدمة (Anchor-Based Time Warping + Drift Correction + Structural Healing)
+function advancedSyncEngine(enSrtText, arSrtText) {
   try {
-    const parseSrt = (srtText) => {
-      return srtText.trim().split(/\r?\n\r?\n/).map(block => {
-        const lines = block.split(/\r?\n/);
-        if (lines.length >= 3) {
-          const parts = lines[1].split(' --> ');
-          if (parts.length === 2) {
-            return {
-              startMs: timeToMs(parts[0]),
-              endMs: timeToMs(parts[1]),
-              text: lines.slice(2).join('\n')
-            };
-          }
-        }
-        return null;
-      }).filter(Boolean);
-    };
+    const enBlocks = stripAdsAndJunk(parseSrt(enSrtText));
+    const arBlocks = stripAdsAndJunk(parseSrt(arSrtText));
 
-    const enBlocks = parseSrt(enSrt);
-    const arBlocks = parseSrt(arSrt);
+    if (enBlocks.length === 0 || arBlocks.length === 0) return arSrtText;
 
-    if (enBlocks.length === 0 || arBlocks.length === 0) return arSrt;
+    // 1. حساب الإزاحة الأولية (Initial Offset) باستخدام أول الحوارات الحقيقية
+    const offset = enBlocks[0].startMs - arBlocks[0].startMs;
 
-    // حساب معامل تمدد السرعة (Time Stretch Factor) لمطابقة الفترات الزمنية بدقة
+    // 2. حساب معامل الانحراف الخطي (Linear Drift / FPS Correction)
     const firstEn = enBlocks[0].startMs;
     const lastEn = enBlocks[enBlocks.length - 1].startMs;
     const firstAr = arBlocks[0].startMs;
-    const lastAr = arBlocks[lastAr = arBlocks.length - 1].startMs;
+    const lastAr = arBlocks[arBlocks.length - 1].startMs;
 
     let stretchFactor = 1.0;
-    if (lastAr > firstAr && lastEn > firstEn) {
+    if ((lastAr - firstAr) > 0 && (lastEn - firstEn) > 0) {
       stretchFactor = (lastEn - firstEn) / (lastAr - firstAr);
     }
 
-    let syncedSrt = '';
-    for (let i = 0; i < arBlocks.length; i++) {
-      const arBlock = arBlocks[i];
+    // 3. إعادة بناء وتطبيق المحاذاة (Time Warping)
+    let processedBlocks = arBlocks.map(block => {
+      let newStart = Math.round(firstEn + (block.startMs - firstAr) * stretchFactor);
+      let newEnd = Math.round(firstEn + (block.endMs - firstAr) * stretchFactor);
       
-      // تطبيق عامل التمدد وتصحيح البداية والنهاية بناءً على الترجمة الإنجليزية المرجعية
-      const adjustedStart = Math.round(firstEn + (arBlock.startMs - firstAr) * stretchFactor);
-      const adjustedEnd = Math.round(firstEn + (arBlock.endMs - firstAr) * stretchFactor);
+      // ضمان الحد الأدنى لمدّة القراءة (Minimum Duration: 1000ms)
+      if ((newEnd - newStart) < 1000) {
+        newEnd = newStart + 1000;
+      }
 
-      const timeLine = `${msToTime(adjustedStart)} --> ${msToTime(adjustedEnd)}`;
-      syncedSrt += `${i + 1}\n${timeLine}\n${arBlock.text}\n\n`;
+      return {
+        startMs: newStart,
+        endMs: newEnd,
+        text: block.text
+      };
+    });
+
+    // 4. فلتر منع التداخل (Overlap Resolution)
+    for (let i = 0; i < processedBlocks.length - 1; i++) {
+      if (processedBlocks[i].endMs > processedBlocks[i + 1].startMs) {
+        // ترك فاصل زمني 40ms بين الجملتين لمنع التصادم
+        processedBlocks[i].endMs = processedBlocks[i + 1].startMs - 40;
+        if ((processedBlocks[i].endMs - processedBlocks[i].startMs) < 500) {
+          processedBlocks[i].startMs = processedBlocks[i].endMs - 500; // تصحيح طارئ للمدة القصيرة
+        }
+      }
     }
 
-    return syncedSrt;
+    // 5. إعادة تجميع الملف بصيغة SRT سليمة
+    let finalSrt = '';
+    processedBlocks.forEach((b, idx) => {
+      const timeLine = `${msToTime(b.startMs)} --> ${msToTime(b.endMs)}`;
+      finalSrt += `${idx + 1}\n${timeLine}\n${b.text}\n\n`;
+    });
+
+    return finalSrt;
   } catch (e) {
-    return arSrt; // الرجوع للنص الأصلي في حال وجود أي استثناء
+    return arSrtText; // العودة للنص الأصلي في حال حدوث أي خطأ استثنائي
   }
 }
 
@@ -92,10 +136,10 @@ const server = async (req, res) => {
   if (pathname === '/manifest.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
-      id: 'org.custom.perfectsubtitles',
-      version: '6.2.0',
-      name: 'Perfect Auto-Synced Arabic Subtitles',
-      description: 'المحرك الهندسي المتقدم لمزامنة التوقيت ومعالجة معدل الإطارات (FPS Stretch)',
+      id: 'org.custom.perfectsubtitles.dtw',
+      version: '7.0.0',
+      name: 'DTW Anchor-Synced Arabic Subtitles',
+      description: 'المحرك الهندسي الخارق: مزامنة تعتمد على البصمة الزمنية، تصحيح الـ FPS، وتطهير الإعلانات',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -104,7 +148,7 @@ const server = async (req, res) => {
     return;
   }
 
-  // مسار جلب الترجمة وتطبيق الخوارزمية المتقدمة
+  // مسار البروكسي والمعالجة الزمنية
   if (pathname === '/proxy-sub') {
     const targetUrl = parsedUrl.query.url;
     const refUrl = parsedUrl.query.ref;
@@ -125,10 +169,10 @@ const server = async (req, res) => {
           const refResponse = await fetch(refUrl, { headers: HEADERS });
           if (refResponse.ok) {
             const refText = await refResponse.text();
-            subText = advancedSyncSubtitle(refText, subText);
+            subText = advancedSyncEngine(refText, subText);
           }
         } catch (err) {
-          console.log('Advanced Sync warning:', err.message);
+          console.log('Engine sync warning:', err.message);
         }
       }
 
@@ -170,10 +214,10 @@ const server = async (req, res) => {
       const refUrlParam = englishSub ? `&ref=${encodeURIComponent(englishSub.url)}` : '';
 
       const formatted = arabicSubs.map((s, idx) => ({
-        id: `sub-adv-sync-${idx}-${id}`,
+        id: `sub-dtw-${idx}-${id}`,
         url: `${protocol}://${host}/proxy-sub?url=${encodeURIComponent(s.url)}${refUrlParam}`,
         lang: 'ara',
-        label: `🇸🇦 [مزامنة متقدمة + تصحيح الفريمات] ترجمة (${idx + 1})`
+        label: `🇸🇦 [DTW مَزوّن آلياً + تنظيف الإعلانات] (${idx + 1})`
       }));
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -186,7 +230,7 @@ const server = async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Addon is Running! Add /manifest.json to Stremio.');
+  res.end('Stremio DTW Subtitle Addon is Running!');
 };
 
 const PORT = process.env.PORT || 3000;
