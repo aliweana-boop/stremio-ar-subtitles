@@ -1,3 +1,7 @@
+// =========================================================================
+// المحرك الاحترافي المتقدم: Signal Overlap Maximization & FPS Correction
+// =========================================================================
+
 function parseSRT(srtText) {
   const normalized = srtText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   const blocks = normalized.split(/\n\s*\n/);
@@ -12,6 +16,7 @@ function parseSRT(srtText) {
         const end = timeToMs(timeMatch[2]);
         const text = lines.slice(2).join('\n').trim();
         
+        // استبعاد الإعلانات حتى لا تؤثر على حسابات الذكاء الاصطناعي
         if (!isAdLine(text) && text.length > 0) {
           items.push({ start, end, text });
         }
@@ -24,7 +29,7 @@ function parseSRT(srtText) {
 function isAdLine(text) {
   const adPatterns = [
     /opensubtitles/i, /subscene/i, /yify/i, /http/i, /www\./i,
-    /ترجمة/i, /تعديل/i, /الحقوق/i, /مشاهدة ممتعة/i, /synced/i, /تقديم/i
+    /ترجمة/i, /تعديل/i, /الحقوق/i, /مشاهدة ممتعة/i, /synced/i, /subby/i
   ];
   return adPatterns.some(pattern => pattern.test(text));
 }
@@ -44,115 +49,133 @@ function msToTime(ms) {
   return `${h}:${m}:${s},${remMs}`;
 }
 
-/**
- * خوارزمية الإجماع الإحصائي (Histogram Consensus):
- * تحسب الفارق الزمني بين كل جملة عربية وجميع الجمل الإنجليزية القريبة منها
- * وتختار الفارق الأكثر تكراراً طوال الفيلم
- */
-function findBestOffset(arItems, refItems) {
-  const bucketSize = 150; // دقة التجميع 150 ملي ثانية
-  const buckets = new Map();
-  const maxSearchWindow = 60000; // البحث في نطاق ±60 ثانية
+// حساب مدى تطابق (تداخل) مسارين زمنيين لتقييم جودة المزامنة
+function calculateOverlapScore(adjustedAr, refItems) {
+  let score = 0;
+  let i = 0;
+  let j = 0;
 
-  for (const ar of arItems) {
-    for (const ref of refItems) {
-      const diff = ref.start - ar.start;
-      if (Math.abs(diff) <= maxSearchWindow) {
-        const bucket = Math.round(diff / bucketSize) * bucketSize;
-        buckets.set(bucket, (buckets.get(bucket) || 0) + 1);
-      }
+  while (i < adjustedAr.length && j < refItems.length) {
+    const ar = adjustedAr[i];
+    const ref = refItems[j];
+
+    if (ar.end <= ref.start) {
+      i++;
+    } else if (ref.end <= ar.start) {
+      j++;
+    } else {
+      const overlapStart = Math.max(ar.start, ref.start);
+      const overlapEnd = Math.min(ar.end, ref.end);
+      score += (overlapEnd - overlapStart);
+
+      if (ar.end < ref.end) i++;
+      else j++;
     }
   }
-
-  let bestOffset = 0;
-  let maxVotes = 0;
-
-  for (const [offset, votes] of buckets.entries()) {
-    if (votes > maxVotes) {
-      maxVotes = votes;
-      bestOffset = offset;
-    }
-  }
-
-  let exactSum = 0;
-  let exactCount = 0;
-  for (const ar of arItems) {
-    for (const ref of refItems) {
-      const diff = ref.start - ar.start;
-      if (Math.abs(diff - bestOffset) <= bucketSize) {
-        exactSum += diff;
-        exactCount++;
-      }
-    }
-  }
-
-  return exactCount > 0 ? Math.round(exactSum / exactCount) : bestOffset;
+  return score;
 }
 
+// محرك الذكاء الاصطناعي للمزامنة (Smart Sync AI)
 function autoResync(arabicItems, refItems, manualOffsetMs = 0) {
   if (!arabicItems.length) return [];
-
-  if (refItems && refItems.length >= 10) {
-    const midPoint = Math.floor(arabicItems.length / 2);
-    const firstHalfAr = arabicItems.slice(0, midPoint);
-    const secondHalfAr = arabicItems.slice(midPoint);
-
-    const offsetFirstHalf = findBestOffset(firstHalfAr, refItems);
-    const offsetSecondHalf = findBestOffset(secondHalfAr, refItems);
-
-    const drift = offsetSecondHalf - offsetFirstHalf;
-    const arSpan = arabicItems[arabicItems.length - 1].start - arabicItems[0].start;
-    const stretchFactor = (arSpan > 0 && Math.abs(drift) > 500) ? (arSpan + drift) / arSpan : 1;
-    const baseStart = arabicItems[0].start;
-
-    const synced = arabicItems.map(item => {
-      const duration = item.end - item.start;
-      const relativePos = item.start - baseStart;
-      const newStart = baseStart + (relativePos * stretchFactor) + offsetFirstHalf + manualOffsetMs;
-      
-      const closest = findClosestRef(newStart, refItems, 600);
-      const finalStart = closest ? (closest.start + manualOffsetMs) : newStart;
-      const finalEnd = finalStart + (duration * stretchFactor);
-
-      return { start: finalStart, end: finalEnd, text: item.text };
-    });
-
-    return healStructure(synced);
+  if (!refItems || refItems.length < 10) {
+    // إذا لم يتوفر ملف مرجعي، نطبق الإزاحة اليدوية فقط
+    return applyShiftAndHeal(arabicItems, 1.0, manualOffsetMs);
   }
 
-  const shifted = arabicItems.map(item => ({
-    start: item.start + manualOffsetMs,
-    end: item.end + manualOffsetMs,
+  // المعاملات القياسية لاختلاف سرعات الإطارات (FPS) في السينما
+  const stretchFactors = [
+    1.0,                // نفس السرعة
+    25 / 23.976,        // تسريع
+    23.976 / 25,        // إبطاء
+    24 / 23.976,        // تسريع طفيف
+    23.976 / 24         // إبطاء طفيف
+  ];
+
+  let bestScore = -1;
+  let bestStretch = 1.0;
+  let bestOffset = 0;
+
+  // أخذ عينة من أول 25 سطر فعلي لاستنتاج نقاط الارتكاز الممكنة
+  const sampleSize = Math.min(25, arabicItems.length, refItems.length);
+  const arSample = arabicItems.slice(0, sampleSize);
+  const refSample = refItems.slice(0, sampleSize);
+
+  for (const stretch of stretchFactors) {
+    let offsetVotes = [];
+
+    // توليد كل احتمالات الإزاحة (Offsets)
+    for (let i = 0; i < arSample.length; i++) {
+      for (let j = 0; j < refSample.length; j++) {
+        const offset = refSample[j].start - Math.round(arSample[i].start * stretch);
+        offsetVotes.push(offset);
+      }
+    }
+
+    // تجميع الإزاحات المتقاربة (Clustering) لاكتشاف النمط الصحيح
+    let clusters = [];
+    for (const off of offsetVotes) {
+      let found = false;
+      for (let c of clusters) {
+        if (Math.abs(c.center - off) < 250) {
+          c.offsets.push(off);
+          c.center = c.offsets.reduce((a, b) => a + b, 0) / c.offsets.length;
+          found = true;
+          break;
+        }
+      }
+      if (!found) clusters.push({ center: off, offsets: [off] });
+    }
+
+    // ترتيب التجمعات حسب الكثافة (الاحتمالات الأقوى أولاً)
+    clusters.sort((a, b) => b.offsets.length - a.offsets.length);
+
+    // اختبار أفضل 3 سيناريوهات للإزاحة مع معامل التمدد الحالي
+    for (let k = 0; k < Math.min(3, clusters.length); k++) {
+      const testOffset = Math.round(clusters[k].center);
+      
+      const adjustedSample = arabicItems.map(item => ({
+        start: Math.round(item.start * stretch) + testOffset,
+        end: Math.round(item.end * stretch) + testOffset
+      }));
+
+      // حساب نتيجة التداخل (Score) للفيلم بأكمله
+      const score = calculateOverlapScore(adjustedSample, refItems);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestStretch = stretch;
+        bestOffset = testOffset;
+      }
+    }
+  }
+
+  // تطبيق النتيجة الفائزة + أي تقديم/تأخير يدوي طلبه المستخدم
+  return applyShiftAndHeal(arabicItems, bestStretch, bestOffset + manualOffsetMs);
+}
+
+function applyShiftAndHeal(items, stretch, offset) {
+  const synced = items.map(item => ({
+    start: Math.round(item.start * stretch) + offset,
+    end: Math.round(item.end * stretch) + offset,
     text: item.text
   }));
 
-  return healStructure(shifted);
-}
-
-function findClosestRef(targetMs, refItems, toleranceMs) {
-  let best = null;
-  let minDiff = toleranceMs;
-  for (const ref of refItems) {
-    const diff = Math.abs(ref.start - targetMs);
-    if (diff < minDiff) {
-      minDiff = diff;
-      best = ref;
-    }
-  }
-  return best;
-}
-
-function healStructure(items) {
+  // تنظيف ومعالجة التداخل (Structural Healing)
   const healed = [];
-  for (let i = 0; i < items.length; i++) {
-    let { start, end, text } = items[i];
+  for (let i = 0; i < synced.length; i++) {
+    let { start, end, text } = synced[i];
     if (end <= 0) continue;
     if (start < 0) start = 0;
 
+    // الحد الأدنى لمدة الظهور على الشاشة لضمان القراءة
     if (end - start < 1000) end = start + 1000;
-    if (i < items.length - 1 && end >= items[i + 1].start) {
-      end = Math.max(start + 500, items[i + 1].start - 40);
+    
+    // منع تداخل الجملتين في نفس اللحظة
+    if (i < synced.length - 1 && end >= synced[i + 1].start) {
+      end = Math.max(start + 500, synced[i + 1].start - 40);
     }
+    
     healed.push({ start, end, text });
   }
   return healed;
