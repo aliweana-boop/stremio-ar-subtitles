@@ -19,10 +19,10 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/manifest.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
-      id: 'org.custom.perfectsubtitles',
-      version: '6.2.0',
-      name: 'Perfect Arabic Subtitles',
-      description: 'محرك المزامنة الإحصائية الجوهرية للترجمة العربية',
+      id: 'org.custom.purearabic',
+      version: '7.0.0',
+      name: '🇸🇦 Pure Arabic Subtitles',
+      description: 'إضافة الترجمات العربية النقية (مصححة ومنظفة بدون تدخلات خارجية)',
       resources: ['subtitles'],
       types: ['movie', 'series'],
       idPrefixes: ['tt'],
@@ -31,10 +31,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // مسار جلب وتنظيف الترجمة العربية
   if (pathname === '/proxy-sub') {
     const arUrl = parsedUrl.query.arUrl;
-    const refUrl = parsedUrl.query.refUrl;
-    const offset = parseInt(parsedUrl.query.offset || '0', 10);
 
     if (!arUrl) {
       res.writeHead(400);
@@ -43,23 +42,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const [arRes, refRes] = await Promise.all([
-        fetch(arUrl, { headers: HEADERS }),
-        refUrl ? fetch(refUrl, { headers: HEADERS }).catch(() => null) : Promise.resolve(null)
-      ]);
-
-      if (!arRes.ok) throw new Error(`HTTP ${arRes.status}`);
+      const response = await fetch(arUrl, { headers: HEADERS });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const arText = await arRes.text();
-      const refText = (refRes && refRes.ok) ? await refRes.text() : null;
-
-      const syncedSrt = processSubtitles(arText, refText, offset);
+      const arText = await response.text();
+      const cleanSrt = processSubtitles(arText);
 
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
         'Content-Disposition': 'inline; filename="subtitle.srt"'
       });
-      res.end(syncedSrt);
+      res.end(cleanSrt);
     } catch (error) {
       res.writeHead(500);
       res.end(`Error processing subtitle: ${error.message}`);
@@ -80,7 +73,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // تصحيح رابط المصدر الرسمي لـ OpenSubtitles Stremio
     const targetUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${encodeURIComponent(id)}${extra ? encodeURI(extra) : ''}.json`;
     const host = req.headers.host;
     const protocol = req.headers['x-forwarded-proto'] || 'https';
@@ -91,35 +83,15 @@ const server = http.createServer(async (req, res) => {
       const subs = parsed.subtitles || [];
 
       const arabicSubs = subs.filter(s => s.lang === 'ara' || s.lang === 'ar');
-      const refSub = subs.find(s => s.lang === 'eng' || s.lang === 'en');
-      const refParam = refSub ? `&refUrl=${encodeURIComponent(refSub.url)}` : '';
-
       const formatted = [];
 
+      // نعرض أفضل 3 ترجمات، لأن نسخة الفيلم قد تختلف من ملف لملف
       arabicSubs.slice(0, 3).forEach((s, idx) => {
-        const baseProxy = `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}${refParam}`;
-        
-        // الخيار الأول: مزامنة تلقائية ذكية
         formatted.push({
-          id: `auto-${idx}-${id}`,
-          url: `${baseProxy}&offset=0`,
+          id: `pure-ar-${idx}-${id}`,
+          url: `${protocol}://${host}/proxy-sub?arUrl=${encodeURIComponent(s.url)}`,
           lang: 'ara',
-          label: `🇸🇦 العربية ${idx + 1} (مزامنة تلقائية ذكية)`
-        });
-
-        // خيارات إضافية للتقديم الفوري إذا كانت الترجمة متأخرة
-        formatted.push({
-          id: `fast1-${idx}-${id}`,
-          url: `${baseProxy}&offset=-1000`,
-          lang: 'ara',
-          label: `🇸🇦 العربية ${idx + 1} (مزامنة + تقديم 1 ثانية)`
-        });
-
-        formatted.push({
-          id: `fast2-${idx}-${id}`,
-          url: `${baseProxy}&offset=-2500`,
-          lang: 'ara',
-          label: `🇸🇦 العربية ${idx + 1} (مزامنة + تقديم 2.5 ثانية)`
+          label: `🇸🇦 العربية (خيار ${idx + 1}) - خالية من الإعلانات`
         });
       });
 
@@ -133,7 +105,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Stremio Perfect Subtitles Addon v6.2.0 is Running!');
+  res.end('Stremio Pure Arabic Subtitles is Running!');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
