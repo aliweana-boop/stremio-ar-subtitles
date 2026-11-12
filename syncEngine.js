@@ -12,7 +12,6 @@ function parseSRT(srtText) {
         const end = timeToMs(timeMatch[2]);
         const text = lines.slice(2).join('\n').trim();
         
-        // استبعاد الإعلانات حتى لا نعتمد عليها كنقطة ارتكاز
         if (!isAdLine(text) && text.length > 0) {
           items.push({ start, end, text });
         }
@@ -51,70 +50,41 @@ function buildSRT(items) {
   }).join('\n\n');
 }
 
-// محرك الارتكاز (Anchor-based Warping)
+// محرك الحقن المباشر: أخذ الوقت من ملف (المرجع الإنجليزي) والنص من ملف آخر (العربي) حبة بحبة
 function processSubtitles(arabicSrtRaw, referenceSrtRaw = null, manualOffsetMs = 0) {
   const arItems = parseSRT(arabicSrtRaw);
   
-  // إذا مافيه مرجع إنجليزي أو الملف صغير جداً
-  if (!referenceSrtRaw || arItems.length < 5) {
+  if (!referenceSrtRaw) {
     return buildSRT(arItems.map(i => ({ ...i, start: i.start + manualOffsetMs, end: i.end + manualOffsetMs })));
   }
 
   const enItems = parseSRT(referenceSrtRaw);
-  if (enItems.length < 5) {
-    return buildSRT(arItems.map(i => ({ ...i, start: i.start + manualOffsetMs, end: i.end + manualOffsetMs })));
+  const finalItems = [];
+  
+  // دمج النص العربي مع الوقت الإنجليزي سطر بسطر (حبة بحبة)
+  const minLength = Math.min(arItems.length, enItems.length);
+
+  for (let i = 0; i < minLength; i++) {
+    finalItems.push({
+      start: enItems[i].start + manualOffsetMs,
+      end: enItems[i].end + manualOffsetMs,
+      text: arItems[i].text // النص من العربي، والوقت من الإنجليزي
+    });
   }
 
-  // أخذ نقطة الارتكاز الأولى (أول حوار فعلي)
-  const arFirst = arItems[0];
-  const enFirst = enItems[0];
-  
-  // أخذ نقطة الارتكاز الأخيرة (آخر حوار فعلي)
-  const arLast = arItems[arItems.length - 1];
-  const enLast = enItems[enItems.length - 1];
-
-  // الإزاحة الأساسية: سحب بداية الترجمة العربية لتتطابق مع بداية الإنجليزية
-  const initialOffset = enFirst.start - arFirst.start;
-
-  // حساب التمدد: هل الترجمة الإنجليزية أطول أم أقصر؟ (يحل مشكلة اختلاف الفريمات)
-  const arDuration = arLast.start - arFirst.start;
-  const enDuration = enLast.start - enFirst.start;
-  
-  let stretchFactor = 1.0;
-  if (arDuration > 0 && enDuration > 0) {
-    const rawStretch = enDuration / arDuration;
-    // التأكد أن التمدد منطقي (بين 0.9 و 1.1) عشان ما نخرب الوقت لو كان فيه خلل بالملف
-    if (rawStretch > 0.9 && rawStretch < 1.1) {
-      stretchFactor = rawStretch;
+  // إذا كانت الترجمة العربية أطول، نكمل الباقي مع ضبط الوقت بناءً على الفارق الأخير
+  if (arItems.length > enItems.length) {
+    const lastSyncOffset = enItems[minLength - 1].start - arItems[minLength - 1].start;
+    for (let i = minLength; i < arItems.length; i++) {
+      finalItems.push({
+        start: arItems[i].start + lastSyncOffset + manualOffsetMs,
+        end: arItems[i].end + lastSyncOffset + manualOffsetMs,
+        text: arItems[i].text
+      });
     }
   }
 
-  const baseStart = arFirst.start;
-
-  // تطبيق السحب والتمديد على كامل الملف العربي
-  const syncedItems = arItems.map(item => {
-    const relativeStart = item.start - baseStart;
-    const duration = item.end - item.start;
-    
-    // التوقيت الجديد = نقطة البداية + (المسافة النسبية × معامل التمدد) + الإزاحة + أي تقديم يدوي
-    const newStart = baseStart + (relativeStart * stretchFactor) + initialOffset + manualOffsetMs;
-    const newEnd = newStart + (duration * stretchFactor);
-
-    return {
-      start: newStart,
-      end: newEnd,
-      text: item.text
-    };
-  });
-
-  // منع التداخل (إذا جملة انتهت وبدأت اللي بعدها بنفس الوقت)
-  for (let i = 0; i < syncedItems.length - 1; i++) {
-    if (syncedItems[i].end >= syncedItems[i+1].start) {
-      syncedItems[i].end = Math.max(syncedItems[i].start + 500, syncedItems[i+1].start - 10);
-    }
-  }
-
-  return buildSRT(syncedItems);
+  return buildSRT(finalItems);
 }
 
 module.exports = { processSubtitles };
